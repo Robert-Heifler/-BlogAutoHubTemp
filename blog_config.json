@@ -1,0 +1,8 @@
+ {
+  "YOUR_BLOGGER_BLOG_ID": {
+    "blog_name": "Weight Loss Tips",
+    "keywords": ["fat loss", "weight loss", "healthy diet"],
+    "title_template": "Watch Now: {video}",
+    "cta_html": "<p>🔥 Free fat-loss guide: <a href='https://your-affiliate-link.com'>Click here</a>.</p>"
+  }
+}
