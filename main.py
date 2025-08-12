@@ -108,6 +108,23 @@ def automation_main():
 
     logging.info("🏁 Automation run completed.")
 
+
+@app.route('/env-check')
+def env_check():
+    def mask(val):
+        if not val:
+            return "MISSING"
+        return f"{val[:4]}...{val[-4:]} (len={len(val)})"
+
+    return {
+        "GOOGLE_CLIENT_ID": mask(os.getenv("GOOGLE_CLIENT_ID")),
+        "GOOGLE_CLIENT_SECRET": mask(os.getenv("GOOGLE_CLIENT_SECRET")),
+        "GOOGLE_REFRESH_TOKEN": mask(os.getenv("GOOGLE_REFRESH_TOKEN")),
+        "BLOG_CONFIG_JSON": "SET" if os.getenv("BLOG_CONFIG_JSON") else "MISSING"
+    }
+
+
+
 if __name__ == "__main__":
     threading.Thread(target=automation_main).start()
     port = int(os.environ.get("PORT", 8080))
