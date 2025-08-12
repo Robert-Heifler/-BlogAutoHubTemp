@@ -18,23 +18,6 @@ BLOGGER_POST_URL = "https://www.googleapis.com/blogger/v3/blogs/{blog_id}/posts/
 app = Flask(__name__)
 
 
-@app.route("/test-env")
-def test_env():
-    import os
-    def mask(val):
-        if not val:
-            return None
-        s = str(val)
-        if len(s) <= 8:
-            return s[0] + "..." + s[-1]
-        return s[:4] + "..." + s[-4:]
-    masked_env = {k: mask(v) for k, v in os.environ.items()}
-    return masked_env
-
-
-
-
-
 @app.route('/health')
 def health():
     return 'OK', 200
