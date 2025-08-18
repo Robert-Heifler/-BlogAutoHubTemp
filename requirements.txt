@@ -3,7 +3,7 @@ requests==2.31.0
 google-api-python-client==2.97.0
 google-auth==2.23.0
 google-auth-oauthlib==1.2.0
-youtube-transcript-api==1.4.6
+youtube-transcript-api==1.2.2
 gunicorn==21.2.0
 
 
