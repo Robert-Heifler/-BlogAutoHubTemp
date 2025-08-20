@@ -1,4 +1,4 @@
-# main.py
+# --- main.py (fixed) ---
 import os
 import sys
 import time
@@ -15,12 +15,8 @@ from tzlocal import get_localzone
 from apscheduler.schedulers.background import BackgroundScheduler
 from langdetect import detect, DetectorFactory
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
-
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-
-
 
 # ----------------- Logging Setup -----------------
 logging.basicConfig(
@@ -42,10 +38,10 @@ def health():
 def last_status():
     return jsonify(LAST_STATUS)
 
-# ---------- New /run-now test route ----------
+# ---------- /run-now test route ----------
 @app.route("/run-now")
 def run_now():
-    threading.Thread(target=generate_and_post, daemon=True).start()
+    threading.Thread(target=lambda: generate_and_post(get_env("NICHE_DEFAULT")), daemon=True).start()
     return "Triggered a test blog post! Check youtubeblog shortly."
 
 # ----------------- Constants -----------------
@@ -59,17 +55,14 @@ REQUIRED_ENV_VARS = [
     "MIN_BLOG_LENGTH",
 ]
 
-BLOG_ID = "5732679007467998989"  # New blog ID
+BLOG_ID = "5732679007467998989"
 BLOG_URL = "https://youtubeblog.blogspot.com/"
 
-# ClickBank offers remain unchanged, include your previous CLICKBANK_OFFERS dict here
+# ClickBank offers dictionary
 CLICKBANK_OFFERS: Dict[str, Dict[str, Any]] = {
-    # Example for weight_loss
     "weight_loss": {
-        "keywords": [
-            "weight loss tips", "fat loss", "metabolism", "calorie deficit",
-            "lose weight fast", "healthy weight loss", "belly fat"
-        ],
+        "keywords": ["weight loss tips", "fat loss", "metabolism", "calorie deficit",
+                     "lose weight fast", "healthy weight loss", "belly fat"],
         "offers": [
             {"name": "Ikaria Lean Belly Juice", "url": "https://hop.clickbank.net/?affiliate=YOURID&vendor=ikaria"},
             {"name": "Java Burn", "url": "https://hop.clickbank.net/?affiliate=YOURID&vendor=javaburn"}
@@ -80,14 +73,11 @@ CLICKBANK_OFFERS: Dict[str, Dict[str, Any]] = {
             "Prefer a simple add-on to your current routine rather than a total overhaul?"
         ]
     },
-    # Add other niches here if needed
 }
 
-# AI prompt template (same as your existing one)
-AI_PROMPT_TEMPLATE = """
-You are an expert health content editor. Transform the following YouTube transcript into a clear, well-structured, ORIGINAL blog post for readers.
+AI_PROMPT_TEMPLATE = """You are an expert health content editor. Transform the following YouTube transcript into a clear, well-structured, ORIGINAL blog post for readers.
 ...
-"""  # keep your full existing AI_PROMPT_TEMPLATE here
+"""  # keep your existing AI prompt
 
 # ----------------- Globals -----------------
 LAST_STATUS = {
@@ -107,6 +97,10 @@ def validate_env() -> None:
     missing = [var for var in REQUIRED_ENV_VARS if not os.environ.get(var)]
     if missing:
         raise RuntimeError(f"Missing required environment variables: {missing}")
+
+def normalize_niche_key(niche_key: str) -> str:
+    """Convert any incoming niche key to lowercase and replace spaces with underscores"""
+    return niche_key.lower().replace('"', '').replace("'", "").replace(" ", "_")
 
 def blogger_service():
     creds = Credentials(
@@ -177,10 +171,7 @@ def try_get_transcript_en(video_id: str) -> Optional[str]:
                 s = tr.fetch()
                 return " ".join([t["text"] for t in s if t.get("text")])
         return None
-    except (TranscriptsDisabled, NoTranscriptFound):
-        return None
-    except Exception as e:
-        logging.warning("Transcript fetch error for %s: %s", video_id, e)
+    except Exception:
         return None
 
 def is_english(text: str) -> bool:
@@ -241,6 +232,7 @@ def post_to_blogger(title: str, html_content: str) -> str:
 
 # ----------------- Orchestrator -----------------
 def find_qualified_video(niche_key: str, max_pages: int = 3) -> Dict[str, Any]:
+    niche_key = normalize_niche_key(niche_key)
     min_blog_len = int(get_env("MIN_BLOG_LENGTH", "800"))
     for _ in range(max_pages):
         candidates = search_yt_videos(niche_key)
@@ -257,7 +249,7 @@ def find_qualified_video(niche_key: str, max_pages: int = 3) -> Dict[str, Any]:
 def generate_and_post(niche_key: Optional[str] = None) -> None:
     LAST_STATUS.update({"last_run": datetime.now().isoformat(), "last_result": None, "last_error": None})
     try:
-        niche = niche_key or get_env("NICHE_DEFAULT")
+        niche = normalize_niche_key(niche_key or get_env("NICHE_DEFAULT"))
         v = find_qualified_video(niche)
         vid, meta, transcript = v["video_id"], v["meta"], v["transcript"]
         html_body = generate_post_html(niche, transcript, meta)
@@ -277,8 +269,8 @@ def generate_and_post(niche_key: Optional[str] = None) -> None:
 def schedule_jobs(sched: BackgroundScheduler):
     tz = get_localzone()
     for dow in ["tue", "wed", "thu"]:
-        sched.add_job(lambda: generate_and_post(), "cron", day_of_week=dow, hour=10, minute=5, timezone=tz, id=f"{dow}-am")
-        sched.add_job(lambda: generate_and_post(), "cron", day_of_week=dow, hour=14, minute=35, timezone=tz, id=f"{dow}-pm")
+        sched.add_job(lambda: generate_and_post(get_env("NICHE_DEFAULT")), "cron", day_of_week=dow, hour=10, minute=5, timezone=tz, id=f"{dow}-am")
+        sched.add_job(lambda: generate_and_post(get_env("NICHE_DEFAULT")), "cron", day_of_week=dow, hour=14, minute=35, timezone=tz, id=f"{dow}-pm")
     logging.info("Scheduler initialized for Tue/Wed/Thu at 10:05 and 14:35.")
 
 # ----------------- Boot & Run -----------------
@@ -294,4 +286,3 @@ def boot_sequence(port: int):
 if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 10000))
     boot_sequence(PORT)
-
