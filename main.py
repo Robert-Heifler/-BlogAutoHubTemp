@@ -19,7 +19,6 @@ from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, No
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 
 # ----------------- Logging Setup -----------------
 logging.basicConfig(
@@ -56,10 +55,10 @@ REQUIRED_ENV_VARS = [
     "NICHE_DEFAULT",
     "MIN_BLOG_LENGTH",
     "GITHUB_TOKEN",
-    "GITHUB_REPO",
+    "GITHUB_REPO"
 ]
 
-BLOG_ID = "5732679007467998989"
+BLOG_ID = "5732679007467998989"  # New blog ID
 BLOG_URL = "https://youtubeblog.blogspot.com/"
 
 CLICKBANK_OFFERS: Dict[str, Dict[str, Any]] = {
@@ -77,15 +76,14 @@ CLICKBANK_OFFERS: Dict[str, Dict[str, Any]] = {
             "Want a gentle nudge to keep today’s momentum going?",
             "Prefer a simple add-on to your current routine rather than a total overhaul?"
         ]
-    }
+    },
 }
 
 AI_PROMPT_TEMPLATE = """
 You are an expert health content editor. Transform the following YouTube transcript into a clear, well-structured, ORIGINAL blog post for readers.
 ...
-"""
+"""  # Keep your full template here
 
-# ----------------- Globals -----------------
 LAST_STATUS = {
     "last_run": None,
     "last_result": None,
@@ -94,7 +92,49 @@ LAST_STATUS = {
     "last_post_id": None,
 }
 
-USED_VIDEOS_FILE = "previously_used_youtube_videos.json"
+# ----------------- GitHub Persistence -----------------
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+GITHUB_REPO = os.environ.get("GITHUB_REPO")
+GITHUB_FILE_PATH = "previously_used_youtube_videos.json"
+
+def github_headers():
+    return {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+def load_used_videos() -> List[str]:
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
+    r = requests.get(url, headers=github_headers())
+    if r.status_code == 200:
+        content = r.json()
+        import base64
+        data = base64.b64decode(content["content"]).decode("utf-8")
+        used = json.loads(data)
+        logging.info("Loaded %d previously used videos from GitHub.", len(used.get("videos", [])))
+        return used.get("videos", [])
+    logging.warning("Could not load previously used videos from GitHub. Starting fresh.")
+    return []
+
+def save_used_videos(videos: List[str]) -> None:
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
+    # get sha for update
+    r = requests.get(url, headers=github_headers())
+    sha = r.json()["sha"] if r.status_code == 200 else None
+    payload = {
+        "message": "Update used videos",
+        "content": base64.b64encode(json.dumps({"videos": videos}, indent=2).encode()).decode(),
+        "branch": "main"
+    }
+    if sha:
+        payload["sha"] = sha
+    r2 = requests.put(url, headers=github_headers(), json=payload)
+    if r2.status_code in (200, 201):
+        logging.info("Updated used videos file on GitHub with %d videos.", len(videos))
+    else:
+        logging.error("Failed to update used videos file: %s", r2.text)
+
+USED_VIDEOS = load_used_videos()
 
 # ----------------- Utilities -----------------
 def get_env(name: str, default: Optional[str] = None) -> str:
@@ -137,41 +177,6 @@ def self_ping_loop(port: int):
         except Exception:
             pass
         time.sleep(600)
-
-# ----------------- GitHub persistence -----------------
-GITHUB_TOKEN = get_env("GITHUB_TOKEN")
-GITHUB_REPO = get_env("GITHUB_REPO")  # format: username/repo
-
-def load_used_videos() -> List[str]:
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{USED_VIDEOS_FILE}"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-    r = requests.get(url, headers=headers)
-    if r.status_code == 200:
-        data = r.json()
-        content = requests.utils.unquote(data["content"]).encode("utf-8")
-        try:
-            decoded = json.loads(content.decode("utf-8"))
-            return decoded if isinstance(decoded, list) else []
-        except Exception:
-            return []
-    return []
-
-def save_used_video(video_id: str) -> None:
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{USED_VIDEOS_FILE}"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-    r = requests.get(url, headers=headers)
-    if r.status_code == 200:
-        data = r.json()
-        sha = data["sha"]
-        current_list = json.loads(requests.utils.unquote(data["content"]).encode("utf-8").decode("utf-8"))
-        if video_id not in current_list:
-            current_list.append(video_id)
-            payload = {
-                "message": f"Add used video {video_id}",
-                "content": json.dumps(current_list, indent=2).encode("utf-8").decode("utf-8"),
-                "sha": sha
-            }
-            requests.put(url, headers=headers, json=payload)
 
 # ----------------- YouTube & Transcript -----------------
 def search_yt_videos(niche_key: str, max_results: int = 15) -> List[Dict[str, Any]]:
@@ -275,18 +280,16 @@ def post_to_blogger(title: str, html_content: str) -> str:
 # ----------------- Orchestrator -----------------
 def find_qualified_video(niche_key: str, max_pages: int = 3) -> Dict[str, Any]:
     min_blog_len = int(get_env("MIN_BLOG_LENGTH", "800"))
-    used_videos = load_used_videos()
     for _ in range(max_pages):
         candidates = search_yt_videos(niche_key)
         for item in candidates:
             vid = item["id"]["videoId"]
-            if vid in used_videos:
-                continue
+            if vid in USED_VIDEOS:
+                continue  # skip duplicates
             details = fetch_video_details(vid)
             transcript = try_get_transcript_en(vid)
             if not qualify_transcript(transcript, min_blog_len):
                 continue
-            save_used_video(vid)
             return {"video_id": vid, "meta": details, "transcript": transcript}
         time.sleep(2)
     raise RuntimeError("No qualified videos found")
@@ -304,6 +307,11 @@ def generate_and_post(niche_key: Optional[str] = None) -> None:
         header_info = f"<p><em>Source video:</em> <strong>{html.escape(snippet['title'])}</strong> by {html.escape(snippet['channelTitle'])} — Published on <strong>{html.escape(snippet['publishedAt'][:10])}</strong></p>"
         final_html = f"{header_info}{embed}{html_body}"
         post_id = post_to_blogger(title, final_html)
+
+        # update used videos
+        USED_VIDEOS.append(vid)
+        save_used_videos(USED_VIDEOS)
+
         LAST_STATUS.update({"last_result": "posted", "last_video_id": vid, "last_post_id": post_id})
         logging.info("✅ Posted to Blogger. Post ID: %s (video %s)", post_id, vid)
     except Exception as e:
@@ -316,19 +324,15 @@ def schedule_jobs(sched: BackgroundScheduler):
     for dow in ["tue", "wed", "thu"]:
         sched.add_job(lambda: generate_and_post(), "cron", day_of_week=dow, hour=10, minute=5, timezone=tz, id=f"{dow}-am")
         sched.add_job(lambda: generate_and_post(), "cron", day_of_week=dow, hour=14, minute=35, timezone=tz, id=f"{dow}-pm")
-    logging.info("Scheduler initialized for Tue/Wed/Thu at 10:05 and 14:35.")
 
-# ----------------- Boot & Run -----------------
-def boot_sequence(port: int):
+# ----------------- Startup -----------------
+if __name__ == "__main__":
     validate_env()
     scheduler = BackgroundScheduler()
     schedule_jobs(scheduler)
     scheduler.start()
-    logging.info("Starting Flask app on port %s", port)
+    logging.info("Scheduler started for Tue/Wed/Thu at 10:05 and 14:35.")
+    port = int(os.environ.get("PORT", 10000))
     threading.Thread(target=self_ping_loop, args=(port,), daemon=True).start()
     app.run(host="0.0.0.0", port=port)
-
-if __name__ == "__main__":
-    PORT = int(os.environ.get("PORT", 10000))
-    boot_sequence(PORT)
 
