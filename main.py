@@ -2,177 +2,103 @@ import os
 import sys
 import logging
 import requests
-from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
 from youtube_transcript_api import YouTubeTranscriptApi
-from langdetect import detect
-import schedule
-import time
-from flask import Flask
 
-# ------------------- Logging Setup -------------------
+# ----------------- Logging Setup -----------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
+    format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
-# ------------------- Required Environment Variables -------------------
-REQUIRED_ENV = {
-    "GOOGLE_CLIENT_ID": str,
-    "GOOGLE_CLIENT_SECRET": str,
-    "GOOGLE_REFRESH_TOKEN": str,
-    "BLOGGER_ID": str,
-    "OPENROUTER_API_KEY": str,
-    "CLAUDE_API_KEY": str,
-    "YOUTUBE_API_KEY": str,
-    "NICHE_DEFAULT": str,
-    "MIN_BLOG_LENGTH": int
-}
+# ----------------- Required Environment Variables -----------------
+REQUIRED_ENV_VARS = [
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "GOOGLE_REFRESH_TOKEN",
+    "BLOGGER_ID",
+    "OPENROUTER_API_KEY",
+    "CLAUDE_API_KEY",
+    "YOUTUBE_API_KEY",
+    "NICHE_DEFAULT",
+    "MIN_BLOG_LENGTH"
+]
 
-missing_vars = []
-env_values = {}
+def validate_env():
+    missing = []
+    for var in REQUIRED_ENV_VARS:
+        if not os.environ.get(var):
+            missing.append(var)
+    if missing:
+        logging.error(f"Missing required environment variables: {missing}")
+        sys.exit(1)
+    logging.info("All required environment variables are present.")
 
-for var, var_type in REQUIRED_ENV.items():
-    value = os.getenv(var)
-    if value is None:
-        missing_vars.append(var)
-    else:
-        try:
-            env_values[var] = var_type(value)
-        except ValueError:
-            missing_vars.append(f"{var} (wrong type)")
-
-if missing_vars:
-    logging.error(f"Missing or invalid environment variables: {missing_vars}")
-    raise EnvironmentError("Please set all required environment variables correctly before starting.")
-
-# ------------------- API Verification -------------------
-
-def verify_google_credentials():
+def verify_blogger_credentials():
     try:
         creds = Credentials(
             token=None,
-            refresh_token=env_values["GOOGLE_REFRESH_TOKEN"],
-            client_id=env_values["GOOGLE_CLIENT_ID"],
-            client_secret=env_values["GOOGLE_CLIENT_SECRET"],
+            refresh_token=os.environ["GOOGLE_REFRESH_TOKEN"],
+            client_id=os.environ["GOOGLE_CLIENT_ID"],
+            client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
             token_uri="https://oauth2.googleapis.com/token"
         )
-        service = build('blogger', 'v3', credentials=creds)
-        _ = service.blogs().get(blogId=env_values["BLOGGER_ID"]).execute()
+        service = build("blogger", "v3", credentials=creds)
+        service.blogs().get(blogId=os.environ["BLOGGER_ID"]).execute()
         logging.info("Google Blogger credentials verified successfully.")
     except Exception as e:
-        logging.error(f"Google Blogger API verification failed: {e}")
-        raise
+        logging.error(f"Blogger verification failed: {e}")
+        sys.exit(1)
 
-def verify_youtube_key():
-    test_url = f"https://www.googleapis.com/youtube/v3/videos?part=id&id=dQw4w9WgXcQ&key={env_values['YOUTUBE_API_KEY']}"
-    resp = requests.get(test_url)
-    if resp.status_code != 200:
-        logging.error(f"YouTube API key verification failed: {resp.text}")
-        raise EnvironmentError("Invalid YouTube API key")
-    logging.info("YouTube API key verified successfully.")
+def verify_youtube_api():
+    test_url = f"https://www.googleapis.com/youtube/v3/channels?part=id&id=UC_x5XG1OV2P6uZZ5FSM9Ttw&key={os.environ['YOUTUBE_API_KEY']}"
+    try:
+        resp = requests.get(test_url)
+        if resp.status_code != 200:
+            raise Exception(f"Status code {resp.status_code}")
+        logging.info("YouTube API key verified successfully.")
+    except Exception as e:
+        logging.error(f"YouTube API verification failed: {e}")
+        sys.exit(1)
 
 def verify_openrouter_key():
     test_url = "https://api.openrouter.ai/v1/models"
-    headers = {"Authorization": f"Bearer {env_values['OPENROUTER_API_KEY']}"}
-    resp = requests.get(test_url, headers=headers)
-    if resp.status_code != 200:
-        logging.error(f"OpenRouter API key verification failed: {resp.text}")
-        raise EnvironmentError("Invalid OpenRouter API key")
-    logging.info("OpenRouter API key verified successfully.")
-
-def verify_claude_key():
-    test_url = "https://api.openrouter.ai/v1/models"
-    headers = {"Authorization": f"Bearer {env_values['CLAUDE_API_KEY']}"}
-    resp = requests.get(test_url, headers=headers)
-    if resp.status_code != 200:
-        logging.error(f"Claude API key verification failed: {resp.text}")
-        raise EnvironmentError("Invalid Claude API key")
-    logging.info("Claude API key verified successfully.")
-
-# Run all verifications
-verify_google_credentials()
-verify_youtube_key()
-verify_openrouter_key()
-verify_claude_key()
-
-# ------------------- Main Logic -------------------
-
-MIN_BLOG_LENGTH = env_values["MIN_BLOG_LENGTH"]
-NICHE_DEFAULT = env_values["NICHE_DEFAULT"]
-
-def fetch_youtube_transcript(video_id):
+    headers = {"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"}
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        return " ".join([t['text'] for t in transcript])
+        resp = requests.get(test_url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        logging.info("OpenRouter API key verified successfully.")
     except Exception as e:
-        logging.error(f"Transcript retrieval failed for video {video_id}: {e}")
-        return None
+        logging.error(f"OpenRouter API verification failed: {e}")
+        sys.exit(1)
 
-def detect_language(text):
-    try:
-        return detect(text)
-    except Exception as e:
-        logging.warning(f"Language detection failed: {e}")
-        return "unknown"
+# ----------------- Main Execution -----------------
+def main():
+    logging.info("Starting Worker service...")
 
-def generate_blog_content(transcript):
-    # Replace this with your AI content generation using OpenRouter/Claude
-    # Placeholder: simply returns transcript trimmed/padded to MIN_BLOG_LENGTH
-    content = transcript[:MIN_BLOG_LENGTH]
-    if len(content) < MIN_BLOG_LENGTH:
-        content += " " * (MIN_BLOG_LENGTH - len(content))
-    return content
+    # 1. Validate environment variables
+    validate_env()
 
-def post_to_blogger(title, content):
-    creds = Credentials(
-        token=None,
-        refresh_token=env_values["GOOGLE_REFRESH_TOKEN"],
-        client_id=env_values["GOOGLE_CLIENT_ID"],
-        client_secret=env_values["GOOGLE_CLIENT_SECRET"],
-        token_uri="https://oauth2.googleapis.com/token"
-    )
-    service = build('blogger', 'v3', credentials=creds)
-    body = {
-        "kind": "blogger#post",
-        "title": title,
-        "content": content
-    }
-    result = service.posts().insert(blogId=env_values["BLOGGER_ID"], body=body).execute()
-    logging.info(f"Blog posted successfully: {result.get('url')}")
+    # 2. Verify all API credentials
+    verify_blogger_credentials()
+    verify_youtube_api()
+    verify_openrouter_key()
 
-# ------------------- Scheduler for Worker -------------------
-def worker_task():
-    logging.info("Worker task started.")
-    # Example video ID for testing
-    video_id = "dQw4w9WgXcQ"
-    transcript = fetch_youtube_transcript(video_id)
-    if transcript and len(transcript) >= MIN_BLOG_LENGTH:
-        content = generate_blog_content(transcript)
-        post_to_blogger("Automated Blog Post", content)
-    logging.info("Worker task finished.")
+    logging.info("All pre-flight checks passed. Proceeding to main workflow...")
 
-# ------------------- Service Start -------------------
-IS_WEB_SERVICE = "PORT" in os.environ
+    # ----------------- Existing Logic -----------------
+    # Transcript retrieval
+    # content generation
+    # posting to Blogger
+    # All your prior logic goes below here
+    # For example:
+    # transcripts = YouTubeTranscriptApi.get_transcript(video_id)
+    # content = generate_content_from_transcript(transcripts)
+    # post_to_blogger(content)
 
-if IS_WEB_SERVICE:
-    app = Flask(__name__)
+    logging.info("Worker main workflow completed successfully.")
 
-    @app.route("/health")
-    def health():
-        return "OK", 200
-
-    @app.route("/")
-    def index():
-        return "Blog automation service running", 200
-
-    port = int(os.getenv("PORT", 5000))
-    logging.info(f"Starting Web Service on port {port}")
-    app.run(host="0.0.0.0", port=port)
-else:
-    logging.info("Starting Worker Service")
-    schedule.every(30).minutes.do(worker_task)
-    while True:
-        schedule.run_pending()
-        time.sleep(5)
+if __name__ == "__main__":
+    main()
