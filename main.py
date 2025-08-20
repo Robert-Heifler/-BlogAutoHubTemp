@@ -2,13 +2,12 @@ import os
 import sys
 import logging
 import requests
+from datetime import datetime
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from youtube_transcript_api import YouTubeTranscriptApi
-from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 import time
-
 
 # ----------------- Logging Setup -----------------
 logging.basicConfig(
@@ -17,7 +16,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
-# ----------------- Environment Variables -----------------
+# ----------------- Required Environment Variables -----------------
 REQUIRED_ENV_VARS = [
     "GOOGLE_CLIENT_ID",
     "GOOGLE_CLIENT_SECRET",
@@ -30,17 +29,25 @@ REQUIRED_ENV_VARS = [
     "MIN_BLOG_LENGTH"
 ]
 
+# ----------------- Niches and ClickBank URLs -----------------
+NICHE_CLICKBANK_MAP = {
+    "Weight Loss": "https://www.clickbank.net/weightloss",
+    "Pelvic Health": "https://www.clickbank.net/pelvichealth",
+    "Joint Relief": "https://www.clickbank.net/jointrelief",
+    "Liver Detox": "https://www.clickbank.net/liverdetox",
+    "Side Hustles": "https://www.clickbank.net/sidehustle",
+    "Respiratory Health": "https://www.clickbank.net/respiratory"
+}
+
+# ----------------- Helper Functions -----------------
+
 def validate_env():
-    missing = []
-    for var in REQUIRED_ENV_VARS:
-        if not os.environ.get(var):
-            missing.append(var)
+    missing = [var for var in REQUIRED_ENV_VARS if not os.environ.get(var)]
     if missing:
         logging.error(f"Missing required environment variables: {missing}")
         sys.exit(1)
     logging.info("All required environment variables are present.")
 
-# ----------------- API Verification -----------------
 def verify_blogger_credentials():
     try:
         creds = Credentials(
@@ -53,6 +60,7 @@ def verify_blogger_credentials():
         service = build("blogger", "v3", credentials=creds)
         service.blogs().get(blogId=os.environ["BLOGGER_ID"]).execute()
         logging.info("Google Blogger credentials verified successfully.")
+        return service
     except Exception as e:
         logging.error(f"Blogger verification failed: {e}")
         sys.exit(1)
@@ -61,8 +69,7 @@ def verify_youtube_api():
     test_url = f"https://www.googleapis.com/youtube/v3/channels?part=id&id=UC_x5XG1OV2P6uZZ5FSM9Ttw&key={os.environ['YOUTUBE_API_KEY']}"
     try:
         resp = requests.get(test_url)
-        if resp.status_code != 200:
-            raise Exception(f"Status code {resp.status_code}")
+        resp.raise_for_status()
         logging.info("YouTube API key verified successfully.")
     except Exception as e:
         logging.error(f"YouTube API verification failed: {e}")
@@ -79,123 +86,108 @@ def verify_openrouter_key():
         logging.error(f"OpenRouter API verification failed: {e}")
         sys.exit(1)
 
-# ----------------- ClickBank Niche Links -----------------
-NICHE_LINKS = {
-    "Weight Loss": "https://www.clickbank.net/affiliate1",
-    "Pelvic Health": "https://www.clickbank.net/affiliate2",
-    "Joint Relief": "https://www.clickbank.net/affiliate3",
-    "Liver Detox": "https://www.clickbank.net/affiliate4",
-    "Side Hustles": "https://www.clickbank.net/affiliate5",
-    "Respiratory Health": "https://www.clickbank.net/affiliate6"
-}
+def get_youtube_videos(niche, min_length=200):
+    # Placeholder search logic: replace with actual YouTube API search
+    logging.info(f"Searching YouTube for niche '{niche}' with min transcript length {min_length}")
+    # Returns a list of video_ids
+    return ["dQw4w9WgXcQ"]  # Example placeholder
 
-# ----------------- YouTube Video Selection -----------------
-def find_valid_video(niche):
-    # Placeholder: logic to search YouTube videos based on niche keywords
-    # Retry until we find one that meets requirements (English, length)
-    search_keywords = niche
-    # Example: YouTube API search here
-    # For now, return a dummy video ID
-    return "dQw4w9WgXcQ"  # Replace with real search logic
-
-def is_transcript_valid(video_id, min_length):
+def get_transcript(video_id):
     try:
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-        text = " ".join([t["text"] for t in transcript_list])
-        if len(text.split()) < min_length:
-            return False, None
-        # Basic English check (could use langdetect if desired)
-        if not all(ord(c) < 128 or c in "\n.,!?'" for c in text):
-            return False, None
-        return True, text
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        words = " ".join([t["text"] for t in transcript])
+        if len(words.split()) < int(os.environ["MIN_BLOG_LENGTH"]):
+            logging.info(f"Transcript too short for video {video_id}, skipping")
+            return None
+        logging.info(f"Transcript fetched and validated for video {video_id}")
+        return transcript
     except Exception as e:
-        logging.warning(f"Transcript invalid for {video_id}: {e}")
-        return False, None
+        logging.warning(f"Failed to get transcript for video {video_id}: {e}")
+        return None
 
-# ----------------- Content Generation -----------------
-def generate_blog_content(transcript, video_id, niche):
+def generate_content(transcript, video_title, video_date, niche):
+    prompt = f"""
+    Create a unique SEO-friendly blog post from this transcript:
+    Transcript: {transcript}
+    Video Title: {video_title}
+    Video Date: {video_date}
+    Niche: {niche}
+    Include a soft CTA linking to {NICHE_CLICKBANK_MAP[niche]}.
+    Ensure content is in English and at least {os.environ['MIN_BLOG_LENGTH']} words.
+    """
     headers = {"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"}
-    payload = {
-        "prompt": f"Generate a blog post in English using this transcript: {transcript}\nInclude the niche affiliate link: {NICHE_LINKS[niche]}\nMention video publish date and title.\n",
-        "model": "claude-instant-v1",
-        "max_tokens": 1500
-    }
-    response = requests.post("https://openrouter.ai/api/v1/completions", json=payload, headers=headers, timeout=20)
-    response.raise_for_status()
-    data = response.json()
-    content = data.get("completion", "")
-    return content
+    data = {"prompt": prompt, "max_tokens": 2000, "temperature": 0.7}
+    try:
+        resp = requests.post("https://openrouter.ai/api/v1/completions", json=data, headers=headers, timeout=15)
+        resp.raise_for_status()
+        content = resp.json().get("choices")[0]["text"]
+        logging.info("Content generated successfully")
+        return content
+    except Exception as e:
+        logging.error(f"Content generation failed: {e}")
+        return None
 
-# ----------------- Post to Blogger -----------------
-def post_to_blogger(title, content):
-    creds = Credentials(
-        token=None,
-        refresh_token=os.environ["GOOGLE_REFRESH_TOKEN"],
-        client_id=os.environ["GOOGLE_CLIENT_ID"],
-        client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
-        token_uri="https://oauth2.googleapis.com/token"
-    )
-    service = build("blogger", "v3", credentials=creds)
-    post_body = {
-        "kind": "blogger#post",
-        "title": title,
-        "content": content
-    }
-    blog_id = os.environ["BLOGGER_ID"]
-    service.posts().insert(blogId=blog_id, body=post_body).execute()
-    logging.info(f"Posted to Blogger: {title}")
+def post_to_blogger(service, title, content):
+    try:
+        body = {"title": title, "content": content}
+        post = service.posts().insert(blogId=os.environ["BLOGGER_ID"], body=body).execute()
+        logging.info(f"Post published successfully: {post['url']}")
+    except Exception as e:
+        logging.error(f"Failed to post to Blogger: {e}")
 
-# ----------------- Worker Workflow -----------------
-def worker_task(niche):
-    min_length = int(os.environ.get("MIN_BLOG_LENGTH", 300))
-    while True:
-        video_id = find_valid_video(niche)
-        valid, transcript = is_transcript_valid(video_id, min_length)
-        if valid:
-            logging.info(f"Selected valid video {video_id} for niche {niche}")
-            # Add video publish date and title
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-            publish_date = datetime.now().strftime("%B %d, %Y")
-            title = f"{niche} Update ({publish_date})"
-            content = generate_blog_content(transcript, video_id, niche)
-            post_to_blogger(title, content)
+# ----------------- Main Workflow -----------------
+
+def run_worker(niche):
+    service = verify_blogger_credentials()
+    videos = get_youtube_videos(niche)
+    for vid in videos:
+        transcript_data = get_transcript(vid)
+        if not transcript_data:
+            continue
+        transcript_text = " ".join([t["text"] for t in transcript_data])
+        content = generate_content(transcript_text, f"Video {vid}", datetime.now().strftime("%Y-%m-%d"), niche)
+        if content:
+            post_to_blogger(service, f"{niche} Update - {datetime.now().strftime('%Y-%m-%d')}", content)
             break
-        else:
-            logging.info(f"Video {video_id} invalid. Searching again...")
 
-# ----------------- Scheduler Setup -----------------
+# ----------------- Scheduler -----------------
+
 def schedule_posts():
     scheduler = BackgroundScheduler()
-    # Tuesday: 2 posts
-    scheduler.add_job(lambda: worker_task("Weight Loss"), 'cron', day_of_week='tue', hour=8, minute=0)
-    scheduler.add_job(lambda: worker_task("Pelvic Health"), 'cron', day_of_week='tue', hour=12, minute=0)
-    # Wednesday: 2 posts
-    scheduler.add_job(lambda: worker_task("Joint Relief"), 'cron', day_of_week='wed', hour=8, minute=0)
-    scheduler.add_job(lambda: worker_task("Liver Detox"), 'cron', day_of_week='wed', hour=12, minute=0)
-    # Thursday: 2 posts
-    scheduler.add_job(lambda: worker_task("Side Hustles"), 'cron', day_of_week='thu', hour=8, minute=0)
-    scheduler.add_job(lambda: worker_task("Respiratory Health"), 'cron', day_of_week='thu', hour=12, minute=0)
+    # Schedule 2 posts each on Tue, Wed, Thu at 09:00 and 15:00
+    days = ["tue", "wed", "thu"]
+    hours = [9, 15]
+    for day in days:
+        for hour in hours:
+            scheduler.add_job(lambda: run_worker(os.environ["NICHE_DEFAULT"]), day_of_week=day, hour=hour)
     scheduler.start()
-    logging.info("Scheduler started with weekly posting times.")
+    logging.info("Scheduled posts initialized")
 
-# ----------------- Main Execution -----------------
+# ----------------- Immediate Test Post -----------------
+
+def immediate_test_post():
+    logging.info("Triggering immediate test post")
+    run_worker(os.environ["NICHE_DEFAULT"])
+
+# ----------------- Main -----------------
+
 def main():
     logging.info("Starting Worker service...")
-
     validate_env()
-    verify_blogger_credentials()
     verify_youtube_api()
     verify_openrouter_key()
-
-    logging.info("All pre-flight checks passed. Proceeding to main workflow...")
     schedule_posts()
+    immediate_test_post()  # Runs once immediately after deploy
+    logging.info("Worker main workflow initialized and scheduler running")
 
+    # Keep service alive for scheduler
     try:
         while True:
-            time.sleep(30)
+            time.sleep(60)
     except (KeyboardInterrupt, SystemExit):
-        logging.info("Worker shutting down.")
+        logging.info("Shutting down worker service")
 
 if __name__ == "__main__":
     main()
+
 
