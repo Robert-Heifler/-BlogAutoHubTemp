@@ -1,113 +1,130 @@
 import os
 import time
+import threading
 import logging
-from datetime import datetime
+from flask import Flask
+
 import requests
-import openai
-from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-import schedule
+from youtube_transcript_api import YouTubeTranscriptApi
+from datetime import datetime
+import openai
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+# --- Logging setup ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Environment variables
-required_env_vars = [
-    'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN',
-    'BLOGGER_ID', 'OPENROUTER_API_KEY', 'CLAUDE_API_KEY',
-    'YOUTUBE_API_KEY', 'NICHE_DEFAULT', 'MIN_BLOG_LENGTH'
-]
+# --- Flask app to keep Render alive ---
+app = Flask(__name__)
 
-env = {}
-missing_vars = []
+@app.route("/")
+def health():
+    return "Service running", 200
 
-for var in required_env_vars:
-    value = os.getenv(var)
-    if not value:
-        missing_vars.append(var)
-    env[var] = value
+# --- Environment variables ---
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+BLOG_ID = os.getenv("BLOG_ID")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
-if missing_vars:
-    logging.error(f"Missing required environment variables: {missing_vars}")
-    raise EnvironmentError(f"Missing required environment variables: {missing_vars}")
+# --- Blogger posting ---
+def post_to_blogger(title: str, content: str):
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
 
-# Spin-up logic to prevent sleeping
-def spin_up_service():
-    logging.info("Spinning up service to prevent sleep mode...")
-    # Dummy GET request to self or keepalive endpoint
-    try:
-        requests.get("https://your-service-url.com/keepalive", timeout=5)
-    except Exception:
-        pass
-    time.sleep(3)  # wait a few seconds for full wake-up
+    creds = Credentials.from_authorized_user_file("token.json", ["https://www.googleapis.com/auth/blogger"])
+    service = build("blogger", "v3", credentials=creds)
 
-spin_up_service()
-
-# Initialize Google Blogger API
-creds = Credentials(
-    token=None,
-    refresh_token=env['GOOGLE_REFRESH_TOKEN'],
-    client_id=env['GOOGLE_CLIENT_ID'],
-    client_secret=env['GOOGLE_CLIENT_SECRET'],
-    token_uri='https://oauth2.googleapis.com/token'
-)
-blogger_service = build('blogger', 'v3', credentials=creds)
-
-# AI prompt function for Claude via OpenRouter
-def get_ai_blog_content(prompt):
-    logging.info("Generating blog content with AI...")
-    headers = {"Authorization": f"Bearer {env['CLAUDE_API_KEY']}"}
-    payload = {"prompt": prompt, "model": "claude-3-haiku", "max_tokens": 1000}
-    response = requests.post("https://api.openrouter.ai/v1/completions", json=payload, headers=headers)
-    response.raise_for_status()
-    return response.json()['completion']
-
-# YouTube video search function
-def search_youtube_videos(query, max_results=3):
-    logging.info(f"Searching YouTube for videos matching: {query}")
-    url = f"https://www.googleapis.com/youtube/v3/search"
-    params = {
-        'part': 'snippet',
-        'q': query,
-        'type': 'video',
-        'key': env['YOUTUBE_API_KEY'],
-        'maxResults': max_results
-    }
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    items = response.json().get('items', [])
-    video_urls = [f"https://www.youtube.com/watch?v={item['id']['videoId']}" for item in items]
-    return video_urls
-
-# Blog creation function
-def create_blog_post(title, content):
-    logging.info(f"Creating blog post: {title}")
-    body = {
+    post = {
         "kind": "blogger#post",
         "title": title,
         "content": content
     }
-    post = blogger_service.posts().insert(blogId=env['BLOGGER_ID'], body=body).execute()
-    logging.info(f"Post created with ID: {post['id']}")
-    return post['id']
+    result = service.posts().insert(blogId=BLOG_ID, body=post, isDraft=False).execute()
+    logging.info(f"Posted to Blogger: {result['url']}")
+    return result['url']
 
-# Full blog workflow
-def run_blog_workflow():
-    niche = env['NICHE_DEFAULT']
-    prompt = f"Write a high-quality, {env['MIN_BLOG_LENGTH']}-word blog post about {niche} including actionable tips."
-    blog_content = get_ai_blog_content(prompt)
-    video_links = search_youtube_videos(niche)
-    # Append videos to blog content
-    for url in video_links:
-        blog_content += f"<br><br>Watch this video: <a href='{url}'>{url}</a>"
-    create_blog_post(f"{niche} Insights - {datetime.now().strftime('%Y-%m-%d')}", blog_content)
+# --- YouTube search + transcript ---
+def find_videos(query="weight loss tips", max_results=3):
+    youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+    search = youtube.search().list(
+        q=query,
+        part="snippet",
+        type="video",
+        videoLicense="creativeCommon",
+        maxResults=max_results
+    ).execute()
+    return [
+        {
+            "id": item["id"]["videoId"],
+            "title": item["snippet"]["title"]
+        }
+        for item in search.get("items", [])
+    ]
 
-# Immediate run for test/manual blog post
-run_blog_workflow()
+def get_transcript(video_id):
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        return " ".join([t["text"] for t in transcript])
+    except Exception as e:
+        logging.warning(f"No transcript for {video_id}: {e}")
+        return None
 
-# Schedule for future daily runs
-schedule.every().day.at("09:00").do(run_blog_workflow)
-while True:
-    schedule.run_pending()
-    time.sleep(60)
+# --- AI summarization ---
+def summarize_with_ai(transcript, video_title):
+    prompt = f"""
+    Create a detailed, SEO-optimized blog post based on the following transcript.
+    The blog should include:
+    - An engaging title
+    - A clear introduction
+    - 3–5 structured sections
+    - A conclusion
+    - Natural inclusion of keywords
+    - Embed code for the YouTube video titled: {video_title}
+
+    Transcript:
+    {transcript}
+    """
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "model": "anthropic/claude-3.5-sonnet",
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=body)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+# --- Main worker loop ---
+def run_job():
+    logging.info("Job started")
+    videos = find_videos()
+    for video in videos:
+        transcript = get_transcript(video["id"])
+        if not transcript:
+            continue
+        content = summarize_with_ai(transcript, video["title"])
+        embed = f'<iframe width="560" height="315" src="https://www.youtube.com/embed/{video["id"]}" frameborder="0" allowfullscreen></iframe>'
+        post_to_blogger(video["title"], embed + "<br><br>" + content)
+    logging.info("Job finished")
+
+def scheduler():
+    while True:
+        now = datetime.utcnow()
+        # Example: post only on Tue/Wed/Thu at 15:00 UTC
+        if now.weekday() in [1, 2, 3] and now.hour == 15 and now.minute == 0:
+            run_job()
+            time.sleep(60)
+        time.sleep(20)
+
+# --- Background thread ---
+def start_scheduler():
+    t = threading.Thread(target=scheduler, daemon=True)
+    t.start()
+
+if __name__ == "__main__":
+    start_scheduler()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
 
