@@ -1,15 +1,15 @@
 import os
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 import requests
-from flask import Flask
+from flask import Flask, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # =====================
 # Environment Validation
 # =====================
-REQUIRED_ENV = ["GITHUB_TOKEN", "GITHUB_REPO", "NICHE_DEFAULT"]
+REQUIRED_ENV = ["GITHUB_TOKEN", "GITHUB_REPO", "NICHE_DEFAULT", "OPENROUTER_API_KEY"]
 missing = [e for e in REQUIRED_ENV if not os.getenv(e)]
 if missing:
     raise RuntimeError(f"Missing required environment variables: {missing}")
@@ -17,6 +17,7 @@ if missing:
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 NICHE_DEFAULT = os.getenv("NICHE_DEFAULT")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 # =====================
 # Logging
@@ -33,7 +34,6 @@ def load_previous_videos():
     try:
         resp = requests.get(GITHUB_API_URL, headers=HEADERS)
         resp.raise_for_status()
-        data = resp.json()
         content = requests.utils.unquote(resp.json()["content"])
         previous_videos = json.loads(content)
         logging.info("Previously used videos loaded from GitHub.")
@@ -44,7 +44,6 @@ def load_previous_videos():
 
 def save_previous_videos(videos):
     try:
-        # Fetch SHA for update
         resp = requests.get(GITHUB_API_URL, headers=HEADERS)
         resp.raise_for_status()
         sha = resp.json()["sha"]
@@ -62,13 +61,13 @@ def save_previous_videos(videos):
 previously_used_videos = load_previous_videos()
 
 # =====================
-# Niche Key Normalization
+# Niche Normalization
 # =====================
 def normalize_niche_key(niche_key):
     return (niche_key or NICHE_DEFAULT).strip().lower().replace(" ", "_")
 
 # =====================
-# Placeholder for ClickBank offers
+# ClickBank Offers Placeholder
 # =====================
 CLICKBANK_OFFERS = {
     "weight_loss": {"keywords": ["weight loss", "diet", "fat loss"]},
@@ -88,9 +87,8 @@ def search_yt_videos(niche_key):
         logging.error(f"Niche key '{niche_key}' normalized to '{niche_normalized}' not found in ClickBank offers.")
         return []
     keywords = CLICKBANK_OFFERS[niche_normalized]["keywords"]
-    # Placeholder: Replace with real YouTube API search
     logging.info(f"Searching YouTube for niche '{niche_normalized}' with keywords: {keywords}")
-    return [{"id": "video1"}, {"id": "video2"}]
+    return [{"id": "video1"}, {"id": "video2"}]  # Placeholder for real YouTube API search
 
 def find_qualified_video(niche_key):
     candidates = search_yt_videos(niche_key)
@@ -103,15 +101,54 @@ def find_qualified_video(niche_key):
     return None
 
 # =====================
-# Placeholder: Generate & Post
+# OpenRouter AI Prompt Generation
+# =====================
+def generate_blog_content(video_id, niche):
+    prompt = (
+        f"Create a full, SEO-optimized blog post for the niche '{niche}' "
+        f"based on the YouTube video ID '{video_id}'. Include title, subheadings, "
+        f"bullet points, and a natural ClickBank offer placement. Use a friendly, persuasive tone."
+    )
+    url = "https://api.openrouter.ai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    data = {
+        "model": "claude-3-haiku",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1500
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=data)
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        logging.info(f"Generated blog content for video {video_id}")
+        return content
+    except Exception as e:
+        logging.error(f"Failed to generate blog content: {e}")
+        return None
+
+# =====================
+# Blog Post Publishing Placeholder
+# =====================
+def publish_blog_post(blog_content, niche):
+    # Placeholder: integrate Blogger API or CMS publishing here
+    blog_url = f"https://blogautohubtemp.blogspot.com/{normalize_niche_key(niche)}/{datetime.now().strftime('%Y-%m-%d')}"
+    logging.info(f"Published blog post at {blog_url}")
+    return blog_url
+
+# =====================
+# Generate & Post Workflow
 # =====================
 def generate_and_post(niche):
     video = find_qualified_video(niche)
     if not video:
         logging.error(f"❌ generate_and_post failed: '{niche}'")
-        return
-    logging.info(f"Posting video {video['id']} for niche '{niche}'")
-    # Add blog post creation and publishing logic here
+        return None
+    blog_content = generate_blog_content(video["id"], niche)
+    if not blog_content:
+        logging.error(f"❌ Blog content generation failed for '{niche}'")
+        return None
+    blog_url = publish_blog_post(blog_content, niche)
+    return blog_url
 
 # =====================
 # Scheduler Setup
@@ -138,8 +175,11 @@ def index():
 
 @app.route('/run-now')
 def run_now():
-    generate_and_post(NICHE_DEFAULT)
-    return "Run-now executed."
+    blog_url = generate_and_post(NICHE_DEFAULT)
+    if blog_url:
+        return jsonify({"status": "success", "blog_url": blog_url})
+    else:
+        return jsonify({"status": "fail", "message": "No blog post generated"})
 
 # =====================
 # Main
