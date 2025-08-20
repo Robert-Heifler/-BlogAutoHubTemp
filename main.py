@@ -10,6 +10,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from datetime import datetime
 import openai
 
+
 # --- Logging setup ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
