@@ -64,7 +64,7 @@ def verify_youtube_api():
         sys.exit(1)
 
 def verify_openrouter_key():
-    test_url = "https://api.openrouter.ai/v1/models"
+    test_url = "https://openrouter.ai/api/v1/models"  # ✅ FIXED ENDPOINT
     headers = {"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"}
     try:
         resp = requests.get(test_url, headers=headers, timeout=10)
