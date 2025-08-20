@@ -1,4 +1,4 @@
-# --- main.py (fixed) ---
+# main.py
 import os
 import sys
 import time
@@ -6,7 +6,8 @@ import html
 import random
 import logging
 import threading
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
 
 import requests
@@ -15,8 +16,10 @@ from tzlocal import get_localzone
 from apscheduler.schedulers.background import BackgroundScheduler
 from langdetect import detect, DetectorFactory
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 # ----------------- Logging Setup -----------------
 logging.basicConfig(
@@ -38,10 +41,9 @@ def health():
 def last_status():
     return jsonify(LAST_STATUS)
 
-# ---------- /run-now test route ----------
 @app.route("/run-now")
 def run_now():
-    threading.Thread(target=lambda: generate_and_post(get_env("NICHE_DEFAULT")), daemon=True).start()
+    threading.Thread(target=generate_and_post, daemon=True).start()
     return "Triggered a test blog post! Check youtubeblog shortly."
 
 # ----------------- Constants -----------------
@@ -53,16 +55,19 @@ REQUIRED_ENV_VARS = [
     "YOUTUBE_API_KEY",
     "NICHE_DEFAULT",
     "MIN_BLOG_LENGTH",
+    "GITHUB_TOKEN",
+    "GITHUB_REPO",
 ]
 
 BLOG_ID = "5732679007467998989"
 BLOG_URL = "https://youtubeblog.blogspot.com/"
 
-# ClickBank offers dictionary
 CLICKBANK_OFFERS: Dict[str, Dict[str, Any]] = {
     "weight_loss": {
-        "keywords": ["weight loss tips", "fat loss", "metabolism", "calorie deficit",
-                     "lose weight fast", "healthy weight loss", "belly fat"],
+        "keywords": [
+            "weight loss tips", "fat loss", "metabolism", "calorie deficit",
+            "lose weight fast", "healthy weight loss", "belly fat"
+        ],
         "offers": [
             {"name": "Ikaria Lean Belly Juice", "url": "https://hop.clickbank.net/?affiliate=YOURID&vendor=ikaria"},
             {"name": "Java Burn", "url": "https://hop.clickbank.net/?affiliate=YOURID&vendor=javaburn"}
@@ -72,12 +77,13 @@ CLICKBANK_OFFERS: Dict[str, Dict[str, Any]] = {
             "Want a gentle nudge to keep today’s momentum going?",
             "Prefer a simple add-on to your current routine rather than a total overhaul?"
         ]
-    },
+    }
 }
 
-AI_PROMPT_TEMPLATE = """You are an expert health content editor. Transform the following YouTube transcript into a clear, well-structured, ORIGINAL blog post for readers.
+AI_PROMPT_TEMPLATE = """
+You are an expert health content editor. Transform the following YouTube transcript into a clear, well-structured, ORIGINAL blog post for readers.
 ...
-"""  # keep your existing AI prompt
+"""
 
 # ----------------- Globals -----------------
 LAST_STATUS = {
@@ -88,6 +94,8 @@ LAST_STATUS = {
     "last_post_id": None,
 }
 
+USED_VIDEOS_FILE = "previously_used_youtube_videos.json"
+
 # ----------------- Utilities -----------------
 def get_env(name: str, default: Optional[str] = None) -> str:
     return os.environ.get(name, default) or ""
@@ -97,10 +105,6 @@ def validate_env() -> None:
     missing = [var for var in REQUIRED_ENV_VARS if not os.environ.get(var)]
     if missing:
         raise RuntimeError(f"Missing required environment variables: {missing}")
-
-def normalize_niche_key(niche_key: str) -> str:
-    """Convert any incoming niche key to lowercase and replace spaces with underscores"""
-    return niche_key.lower().replace('"', '').replace("'", "").replace(" ", "_")
 
 def blogger_service():
     creds = Credentials(
@@ -134,6 +138,41 @@ def self_ping_loop(port: int):
             pass
         time.sleep(600)
 
+# ----------------- GitHub persistence -----------------
+GITHUB_TOKEN = get_env("GITHUB_TOKEN")
+GITHUB_REPO = get_env("GITHUB_REPO")  # format: username/repo
+
+def load_used_videos() -> List[str]:
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{USED_VIDEOS_FILE}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    r = requests.get(url, headers=headers)
+    if r.status_code == 200:
+        data = r.json()
+        content = requests.utils.unquote(data["content"]).encode("utf-8")
+        try:
+            decoded = json.loads(content.decode("utf-8"))
+            return decoded if isinstance(decoded, list) else []
+        except Exception:
+            return []
+    return []
+
+def save_used_video(video_id: str) -> None:
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{USED_VIDEOS_FILE}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    r = requests.get(url, headers=headers)
+    if r.status_code == 200:
+        data = r.json()
+        sha = data["sha"]
+        current_list = json.loads(requests.utils.unquote(data["content"]).encode("utf-8").decode("utf-8"))
+        if video_id not in current_list:
+            current_list.append(video_id)
+            payload = {
+                "message": f"Add used video {video_id}",
+                "content": json.dumps(current_list, indent=2).encode("utf-8").decode("utf-8"),
+                "sha": sha
+            }
+            requests.put(url, headers=headers, json=payload)
+
 # ----------------- YouTube & Transcript -----------------
 def search_yt_videos(niche_key: str, max_results: int = 15) -> List[Dict[str, Any]]:
     yt = youtube_service()
@@ -147,7 +186,7 @@ def search_yt_videos(niche_key: str, max_results: int = 15) -> List[Dict[str, An
         order="relevance",
         safeSearch="moderate",
         videoDuration="medium",
-        publishedAfter=(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)).isoformat()
+        publishedAfter=(datetime.now(timezone.utc) - timedelta(days=180)).isoformat()  # last 180 days
     )
     res = req.execute()
     return res.get("items", [])
@@ -171,7 +210,10 @@ def try_get_transcript_en(video_id: str) -> Optional[str]:
                 s = tr.fetch()
                 return " ".join([t["text"] for t in s if t.get("text")])
         return None
-    except Exception:
+    except (TranscriptsDisabled, NoTranscriptFound):
+        return None
+    except Exception as e:
+        logging.warning("Transcript fetch error for %s: %s", video_id, e)
         return None
 
 def is_english(text: str) -> bool:
@@ -232,16 +274,19 @@ def post_to_blogger(title: str, html_content: str) -> str:
 
 # ----------------- Orchestrator -----------------
 def find_qualified_video(niche_key: str, max_pages: int = 3) -> Dict[str, Any]:
-    niche_key = normalize_niche_key(niche_key)
     min_blog_len = int(get_env("MIN_BLOG_LENGTH", "800"))
+    used_videos = load_used_videos()
     for _ in range(max_pages):
         candidates = search_yt_videos(niche_key)
         for item in candidates:
             vid = item["id"]["videoId"]
+            if vid in used_videos:
+                continue
             details = fetch_video_details(vid)
             transcript = try_get_transcript_en(vid)
             if not qualify_transcript(transcript, min_blog_len):
                 continue
+            save_used_video(vid)
             return {"video_id": vid, "meta": details, "transcript": transcript}
         time.sleep(2)
     raise RuntimeError("No qualified videos found")
@@ -249,7 +294,7 @@ def find_qualified_video(niche_key: str, max_pages: int = 3) -> Dict[str, Any]:
 def generate_and_post(niche_key: Optional[str] = None) -> None:
     LAST_STATUS.update({"last_run": datetime.now().isoformat(), "last_result": None, "last_error": None})
     try:
-        niche = normalize_niche_key(niche_key or get_env("NICHE_DEFAULT"))
+        niche = niche_key or get_env("NICHE_DEFAULT")
         v = find_qualified_video(niche)
         vid, meta, transcript = v["video_id"], v["meta"], v["transcript"]
         html_body = generate_post_html(niche, transcript, meta)
@@ -269,8 +314,8 @@ def generate_and_post(niche_key: Optional[str] = None) -> None:
 def schedule_jobs(sched: BackgroundScheduler):
     tz = get_localzone()
     for dow in ["tue", "wed", "thu"]:
-        sched.add_job(lambda: generate_and_post(get_env("NICHE_DEFAULT")), "cron", day_of_week=dow, hour=10, minute=5, timezone=tz, id=f"{dow}-am")
-        sched.add_job(lambda: generate_and_post(get_env("NICHE_DEFAULT")), "cron", day_of_week=dow, hour=14, minute=35, timezone=tz, id=f"{dow}-pm")
+        sched.add_job(lambda: generate_and_post(), "cron", day_of_week=dow, hour=10, minute=5, timezone=tz, id=f"{dow}-am")
+        sched.add_job(lambda: generate_and_post(), "cron", day_of_week=dow, hour=14, minute=35, timezone=tz, id=f"{dow}-pm")
     logging.info("Scheduler initialized for Tue/Wed/Thu at 10:05 and 14:35.")
 
 # ----------------- Boot & Run -----------------
@@ -286,3 +331,4 @@ def boot_sequence(port: int):
 if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 10000))
     boot_sequence(PORT)
+
