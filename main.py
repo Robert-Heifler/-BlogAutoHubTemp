@@ -1,180 +1,103 @@
 import os
 import json
 import logging
-from datetime import datetime
-import requests
-from flask import Flask, jsonify
+import random
+from flask import Flask, request
 from apscheduler.schedulers.background import BackgroundScheduler
-from google.oauth2.credentials import Credentials
+from datetime import datetime
 from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 from youtube_transcript_api import YouTubeTranscriptApi
 
-# =====================
-# Environment Variables
-# =====================
-REQUIRED_ENV = ["GITHUB_TOKEN", "GITHUB_REPO", "NICHE_DEFAULT", "YOUTUBE_API_KEY", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "BLOGGER_BLOG_ID"]
-missing = [e for e in REQUIRED_ENV if not os.getenv(e)]
-if missing:
-    raise RuntimeError(f"Missing required environment variables: {missing}")
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_REPO = os.getenv("GITHUB_REPO")
-NICHE_DEFAULT = os.getenv("NICHE_DEFAULT")
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
-BLOGGER_BLOG_ID = os.getenv("BLOGGER_BLOG_ID")
-
-# =====================
-# Logging
-# =====================
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
-# =====================
-# GitHub Persistence
-# =====================
-GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/previously_used_youtube_videos.json"
-HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"}
-
-def load_previous_videos():
-    try:
-        resp = requests.get(GITHUB_API_URL, headers=HEADERS)
-        resp.raise_for_status()
-        content = requests.utils.unquote(resp.json()["content"])
-        return json.loads(content)
-    except Exception as e:
-        logging.warning(f"Could not load previously used videos from GitHub. Starting fresh. Error: {e}")
-        return {"videos": []}
-
-def save_previous_videos(videos):
-    try:
-        resp = requests.get(GITHUB_API_URL, headers=HEADERS)
-        resp.raise_for_status()
-        sha = resp.json()["sha"]
-        payload = {
-            "message": f"Update used videos {datetime.now().isoformat()}",
-            "content": json.dumps(videos, indent=2).encode("utf-8").hex(),
-            "sha": sha
-        }
-        put_resp = requests.put(GITHUB_API_URL, headers=HEADERS, json=payload)
-        put_resp.raise_for_status()
-        logging.info("Previously used videos updated on GitHub.")
-    except Exception as e:
-        logging.error(f"Failed to update previously used videos on GitHub: {e}")
-
-previously_used_videos = load_previous_videos()
-
-# =====================
-# Niche Configuration
-# =====================
-CLICKBANK_OFFERS = {
-    "weight_loss": {"keywords": ["weight loss", "diet", "fat loss"]},
-    "pelvic_health": {"keywords": ["pelvic floor", "kegel"]},
-    "joint_relief": {"keywords": ["joint pain", "arthritis"]},
-    "liver_detox": {"keywords": ["liver cleanse", "detox"]},
-    "side_hustles": {"keywords": ["side hustle", "make money online"]},
-    "respiratory_health": {"keywords": ["lung health", "respiratory support"]},
-}
-
-def normalize_niche_key(niche_key):
-    return (niche_key or NICHE_DEFAULT).strip().lower().replace(" ", "_")
-
-# =====================
-# YouTube API Search
-# =====================
-from googleapiclient.discovery import build
-
-yt_service = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
-
-def search_youtube_video(niche_key):
-    niche_normalized = normalize_niche_key(niche_key)
-    keywords = CLICKBANK_OFFERS.get(niche_normalized, {}).get('keywords', [])
-    if not keywords:
-        logging.error(f"No keywords found for niche {niche_key}")
-        return None
-    query = ' '.join(keywords)
-    request = yt_service.search().list(part='id', type='video', q=query, videoLicense='creativeCommon', maxResults=5)
-    response = request.execute()
-    for item in response.get('items', []):
-        vid_id = item['id']['videoId']
-        if vid_id not in previously_used_videos['videos']:
-            previously_used_videos['videos'].append(vid_id)
-            save_previous_videos(previously_used_videos)
-            return vid_id
-    logging.warning(f"No new Creative Commons videos found for niche '{niche_key}'")
-    return None
-
-# =====================
-# AI Blog Generation
-# =====================
-import openai
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-def generate_blog_content(transcript, niche_key):
-    prompt = f"Create a detailed, engaging blog post for niche '{niche_key}' using the following transcript: {transcript}" 
-    response = openai.Completion.create(model="text-davinci-003", prompt=prompt, max_tokens=1500)
-    return response.choices[0].text
-
-# =====================
-# Blogger Posting
-# =====================
-def post_to_blogger(title, content):
-    creds = Credentials.from_authorized_user_info({
-        'client_id': os.getenv('GOOGLE_CLIENT_ID'),
-        'client_secret': os.getenv('GOOGLE_CLIENT_SECRET')
-    })
-    service = build('blogger', 'v3', credentials=creds)
-    body = {
-        'kind': 'blogger#post',
-        'title': title,
-        'content': content
-    }
-    post = service.posts().insert(blogId=BLOGGER_BLOG_ID, body=body).execute()
-    return f"https://{service._baseUrl}/blog/{BLOGGER_BLOG_ID}/posts/{post['id']}"
-
-# =====================
-# Generate & Post
-# =====================
-def generate_and_post(niche_key):
-    video_id = search_youtube_video(niche_key)
-    if not video_id:
-        return None
-    transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-    transcript_text = ' '.join([t['text'] for t in transcript_list])
-    blog_content = generate_blog_content(transcript_text, niche_key)
-    blog_url = post_to_blogger(f"{niche_key} Insights - {datetime.now().strftime('%Y-%m-%d')}", blog_content)
-    logging.info(f"Blog post created at {blog_url}")
-    return blog_url
-
-# =====================
-# Flask + Scheduler
-# =====================
+# Flask app
 app = Flask(__name__)
+
+# Scheduler
 scheduler = BackgroundScheduler()
 
+# File paths
+KEYWORDS_FILE = "keywords.jason"
+USED_INDEX_FILE = "used_keyword_index.json"
+
+# Load keywords
+if os.path.exists(KEYWORDS_FILE):
+    with open(KEYWORDS_FILE, "r", encoding="utf-8") as f:
+        try:
+            KEYWORDS_DATA = json.load(f)
+        except Exception as e:
+            logging.error(f"Failed to parse {KEYWORDS_FILE}: {e}")
+            KEYWORDS_DATA = {}
+else:
+    logging.error(f"{KEYWORDS_FILE} not found!")
+    KEYWORDS_DATA = {}
+
+# Load used keyword indexes to rotate sequentially
+if os.path.exists(USED_INDEX_FILE):
+    with open(USED_INDEX_FILE, "r", encoding="utf-8") as f:
+        try:
+            USED_INDEX = json.load(f)
+        except Exception as e:
+            logging.error(f"Failed to parse {USED_INDEX_FILE}: {e}")
+            USED_INDEX = {}
+else:
+    USED_INDEX = {}
+
+# Function to get next keyword sequentially for a niche
+def get_next_keyword(niche):
+    keywords = KEYWORDS_DATA.get(niche, [])
+    if not keywords:
+        logging.error(f"No keywords found for niche '{niche}'")
+        return None
+    index = USED_INDEX.get(niche, 0)
+    keyword = keywords[index % len(keywords)]
+    USED_INDEX[niche] = (index + 1) % len(keywords)
+    # Save back updated index
+    with open(USED_INDEX_FILE, "w", encoding="utf-8") as f:
+        json.dump(USED_INDEX, f, indent=2)
+    return keyword
+
+# Example function: find YouTube videos and create blog post
+def create_blog_post(niche):
+    keyword = get_next_keyword(niche)
+    if not keyword:
+        logging.error(f"No keyword available for niche {niche}. Skipping post creation.")
+        return
+
+    logging.info(f"Using keyword '{keyword}' for niche '{niche}'")
+
+    # Your YouTube search and transcript workflow goes here
+    # (Pseudo code for integration; adapt as needed)
+    # videos = search_youtube(keyword)
+    # transcript = YouTubeTranscriptApi.get_transcript(videos[0]['id'])
+    # blog_content = generate_blog_content(transcript, keyword)
+    # post_to_blogger(blog_content, niche)
+
+# Scheduler jobs
 def schedule_jobs():
-    niches = list(CLICKBANK_OFFERS.keys())
-    for niche in niches:
-        scheduler.add_job(lambda n=niche: generate_and_post(n), 'cron', day_of_week='tue,wed,thu', hour=10, minute=5)
-        scheduler.add_job(lambda n=niche: generate_and_post(n), 'cron', day_of_week='tue,wed,thu', hour=14, minute=35)
+    # Example: Tue/Wed/Thu at 10:05 and 14:35
+    scheduler.add_job(lambda: create_blog_post("Weight Loss"), 'cron', day_of_week='1-3', hour=10, minute=5)
+    scheduler.add_job(lambda: create_blog_post("Weight Loss"), 'cron', day_of_week='1-3', hour=14, minute=35)
+    # Add other niches similarly
     scheduler.start()
-    logging.info("Scheduler started for Tue/Wed/Thu at 10:05 and 14:35.")
+    logging.info("Scheduler started")
 
-schedule_jobs()
+# Flask routes
+@app.route("/")
+def home():
+    return "Blog Worker Running"
 
-@app.route('/')
-def index():
-    return "Blog Auto Hub Worker is running!"
-
-@app.route('/run-now')
+@app.route("/run-now")
 def run_now():
-    blog_url = generate_and_post(NICHE_DEFAULT)
-    if blog_url:
-        return jsonify({'message': 'Blog post generated', 'status': 'success', 'url': blog_url})
-    else:
-        return jsonify({'message': 'No blog post generated', 'status': 'fail'})
+    niche = request.args.get("niche", "Weight Loss")
+    create_blog_post(niche)
+    return f"Triggered blog post creation for niche '{niche}'"
 
-# =====================
 # Main
-# =====================
-if __name__ == '__main__':
-    logging.info("Starting Flask app...")
-    app.run(host='0.0.0.0', port=10000)
+if __name__ == "__main__":
+    schedule_jobs()
+    app.run(host="0.0.0.0", port=10000)
