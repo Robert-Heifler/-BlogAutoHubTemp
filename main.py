@@ -1,103 +1,133 @@
 import os
 import json
-import logging
 import random
-from flask import Flask, request
-from apscheduler.schedulers.background import BackgroundScheduler
+import logging
 from datetime import datetime
-from googleapiclient.discovery import build
+from flask import Flask, request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from youtube_transcript_api import YouTubeTranscriptApi
+from googleapiclient.discovery import build
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+# -----------------------------
+# CONFIGURATION
+# -----------------------------
+SCOPES = ['https://www.googleapis.com/auth/blogger']
+BLOG_ID = os.getenv('BLOG_ID')  # Ensure this is set in environment
+KEYWORDS_FILE = 'keywords.jason'  # Your keywords file
+SCHEDULE_TIMES = [("Tue", "10:05"), ("Wed", "10:05"), ("Thu", "10:05")]
 
-# Flask app
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
 app = Flask(__name__)
-
-# Scheduler
 scheduler = BackgroundScheduler()
+scheduler.start()
 
-# File paths
-KEYWORDS_FILE = "keywords.jason"
-USED_INDEX_FILE = "used_keyword_index.json"
+# -----------------------------
+# LOAD KEYWORDS
+# -----------------------------
+def load_keywords():
+    if not os.path.exists(KEYWORDS_FILE):
+        logging.error(f"Keywords file not found: {KEYWORDS_FILE}")
+        return {}
+    with open(KEYWORDS_FILE, 'r') as f:
+        return json.load(f)
 
-# Load keywords
-if os.path.exists(KEYWORDS_FILE):
-    with open(KEYWORDS_FILE, "r", encoding="utf-8") as f:
-        try:
-            KEYWORDS_DATA = json.load(f)
-        except Exception as e:
-            logging.error(f"Failed to parse {KEYWORDS_FILE}: {e}")
-            KEYWORDS_DATA = {}
-else:
-    logging.error(f"{KEYWORDS_FILE} not found!")
-    KEYWORDS_DATA = {}
+keywords_data = load_keywords()
 
-# Load used keyword indexes to rotate sequentially
-if os.path.exists(USED_INDEX_FILE):
-    with open(USED_INDEX_FILE, "r", encoding="utf-8") as f:
-        try:
-            USED_INDEX = json.load(f)
-        except Exception as e:
-            logging.error(f"Failed to parse {USED_INDEX_FILE}: {e}")
-            USED_INDEX = {}
-else:
-    USED_INDEX = {}
+# -----------------------------
+# GOOGLE API AUTH
+# -----------------------------
+def get_blogger_service():
+    creds = None
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if not creds or not creds.valid:
+        flow = InstalledAppFlow.from_client_secrets_file(
+            'credentials.json', SCOPES)
+        creds = flow.run_local_server(port=0)
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+    service = build('blogger', 'v3', credentials=creds)
+    return service
 
-# Function to get next keyword sequentially for a niche
-def get_next_keyword(niche):
-    keywords = KEYWORDS_DATA.get(niche, [])
-    if not keywords:
-        logging.error(f"No keywords found for niche '{niche}'")
-        return None
-    index = USED_INDEX.get(niche, 0)
-    keyword = keywords[index % len(keywords)]
-    USED_INDEX[niche] = (index + 1) % len(keywords)
-    # Save back updated index
-    with open(USED_INDEX_FILE, "w", encoding="utf-8") as f:
-        json.dump(USED_INDEX, f, indent=2)
-    return keyword
+service = get_blogger_service()
 
-# Example function: find YouTube videos and create blog post
+# -----------------------------
+# LOG ALL BLOGS
+# -----------------------------
+def log_all_blogs():
+    try:
+        blogs = service.blogs().listByUser(userId='self').execute()
+        logging.info("Blogs available to this account:")
+        for b in blogs.get('items', []):
+            logging.info(f" - ID: {b['id']} | Name: {b['name']} | URL: {b['url']}")
+    except Exception as e:
+        logging.error(f"Error fetching blogs list: {e}")
+
+log_all_blogs()
+
+# -----------------------------
+# POST CREATION
+# -----------------------------
 def create_blog_post(niche):
-    keyword = get_next_keyword(niche)
-    if not keyword:
-        logging.error(f"No keyword available for niche {niche}. Skipping post creation.")
+    if niche not in keywords_data or not keywords_data[niche]:
+        logging.error(f"No keywords found for niche '{niche}'")
         return
-
+    keyword = random.choice(keywords_data[niche])
     logging.info(f"Using keyword '{keyword}' for niche '{niche}'")
 
-    # Your YouTube search and transcript workflow goes here
-    # (Pseudo code for integration; adapt as needed)
-    # videos = search_youtube(keyword)
-    # transcript = YouTubeTranscriptApi.get_transcript(videos[0]['id'])
-    # blog_content = generate_blog_content(transcript, keyword)
-    # post_to_blogger(blog_content, niche)
+    post_title = f"{keyword.title()} - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    post_content = f"<p>Automated post content for keyword: {keyword}</p>"
 
-# Scheduler jobs
+    post = {
+        'kind': 'blogger#post',
+        'title': post_title,
+        'content': post_content
+    }
+
+    try:
+        # Log blog info before posting
+        blog_info = service.blogs().get(blogId=BLOG_ID).execute()
+        logging.info(f"Attempting to post to blog:")
+        logging.info(f" - Blog ID: {BLOG_ID}")
+        logging.info(f" - Blog title: {blog_info.get('name')}")
+        logging.info(f" - Blog URL: {blog_info.get('url')}")
+
+        # Insert post
+        result = service.posts().insert(blogId=BLOG_ID, body=post).execute()
+        logging.info(f"Post published successfully! URL: {result.get('url')}")
+
+    except Exception as e:
+        logging.error(f"Error posting to Blogger: {e}")
+
+# -----------------------------
+# SCHEDULER
+# -----------------------------
 def schedule_jobs():
-    # Example: Tue/Wed/Thu at 10:05 and 14:35
-    scheduler.add_job(lambda: create_blog_post("Weight Loss"), 'cron', day_of_week='1-3', hour=10, minute=5)
-    scheduler.add_job(lambda: create_blog_post("Weight Loss"), 'cron', day_of_week='1-3', hour=14, minute=35)
-    # Add other niches similarly
-    scheduler.start()
-    logging.info("Scheduler started")
+    for day, time_str in SCHEDULE_TIMES:
+        hour, minute = map(int, time_str.split(":"))
+        scheduler.add_job(lambda: create_blog_post("Weight Loss"), 'cron', day_of_week=day.lower()[:3], hour=hour, minute=minute)
+    logging.info(f"Scheduler started for {SCHEDULE_TIMES}")
 
-# Flask routes
-@app.route("/")
+schedule_jobs()
+
+# -----------------------------
+# FLASK ENDPOINTS
+# -----------------------------
+@app.route('/')
 def home():
-    return "Blog Worker Running"
+    return "Blog Worker is running"
 
-@app.route("/run-now")
+@app.route('/run-now')
 def run_now():
-    niche = request.args.get("niche", "Weight Loss")
+    niche = request.args.get('niche', 'Weight Loss')
     create_blog_post(niche)
-    return f"Triggered blog post creation for niche '{niche}'"
+    return f"Triggered post creation for niche: {niche}"
 
-# Main
-if __name__ == "__main__":
-    schedule_jobs()
-    app.run(host="0.0.0.0", port=10000)
+# -----------------------------
+# RUN APP
+# -----------------------------
+if __name__ == '__main__':
+    logging.info("Starting Flask app...")
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
