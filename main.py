@@ -4,6 +4,30 @@ import random
 import datetime
 import requests
 from flask import Flask
+import os
+
+# === Print deployed filesystem ===
+print("===== Deployed filesystem structure =====")
+for root, dirs, files in os.walk("/app"):  # /app is where Render mounts your repo
+    print(f"Directory: {root}")
+    print(f" Subdirectories: {dirs}")
+    print(f" Files: {files}")
+print("===== End of filesystem structure =====")
+
+# === Check for required files ===
+required_files = ["main.py", "keywords.json", "config.json"]  # add all your needed files here
+missing_files = []
+for file in required_files:
+    file_path = os.path.join("/app", file)
+    if not os.path.isfile(file_path):
+        missing_files.append(file)
+
+if missing_files:
+    print("!!! MISSING FILES !!!")
+    for f in missing_files:
+        print(f" - {f}")
+else:
+    print("All required files are present ✅")
 
 app = Flask(__name__)
 
