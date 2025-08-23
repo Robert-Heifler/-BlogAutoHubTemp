@@ -1,5 +1,5 @@
 # youtube_video_selector.py
-# Fully automated YouTube video selector with scoring, JSON output for met/near-threshold videos.
+# Fully automated YouTube video selector with adjusted scoring
 
 import os
 import json
@@ -11,11 +11,11 @@ from isodate import parse_duration
 # ==========================
 # Configuration
 # ==========================
-API_KEY = os.getenv("YOUTUBE_API_KEY")  # Must be set in environment
+API_KEY = os.getenv("YOUTUBE_API_KEY")
 YOUTUBE_API_SERVICE_NAME = "youtube"
 YOUTUBE_API_VERSION = "v3"
 MAX_RESULTS = 10
-THRESHOLD = 0.8
+THRESHOLD = 0.6  # 25% reduction from 0.8
 NEAR_THRESHOLD = THRESHOLD * 0.9  # 10% below threshold
 
 # ==========================
