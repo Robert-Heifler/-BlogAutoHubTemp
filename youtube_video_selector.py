@@ -1,114 +1,100 @@
 # youtube_video_selector.py
-# Fetches, scores, and ranks Creative Commons YouTube videos with pagination and robust handling.
+# Fully automated YouTube video selector with scoring, JSON output for met/near-threshold videos.
 
+import os
+import json
+from datetime import datetime
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-import os
-from datetime import datetime, timezone
-import re
-from typing import List, Dict, Optional
+from isodate import parse_duration
 
 # ==========================
 # Configuration
 # ==========================
-API_KEY = os.getenv("YOUTUBE_API_KEY")
+API_KEY = os.getenv("YOUTUBE_API_KEY")  # Must be set in environment
+YOUTUBE_API_SERVICE_NAME = "youtube"
+YOUTUBE_API_VERSION = "v3"
 MAX_RESULTS = 10
-
-if not API_KEY:
-    raise RuntimeError("YOUTUBE_API_KEY environment variable is not set.")
+THRESHOLD = 0.8
+NEAR_THRESHOLD = THRESHOLD * 0.9  # 10% below threshold
 
 # ==========================
-# YouTube Client
+# Niches and Keywords
 # ==========================
-def get_youtube_client():
-    return build("youtube", "v3", developerKey=API_KEY)
+niches = {
+    "Weight Loss": ["weight loss tips", "fat burning workout", "healthy diet"],
+    "Fitness": ["home workout", "HIIT training", "strength training"],
+    # Add more niches and keywords as needed
+}
 
 # ==========================
 # Helper Functions
 # ==========================
-def iso8601_duration_to_minutes(duration: str) -> Optional[float]:
-    """Convert ISO 8601 duration (PT#H#M#S) to minutes."""
-    try:
-        hours = minutes = seconds = 0
-        match = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', duration)
-        if match:
-            h, m, s = match.groups()
-            hours = int(h) if h else 0
-            minutes = int(m) if m else 0
-            seconds = int(s) if s else 0
-        return hours * 60 + minutes + seconds / 60
-    except Exception as e:
-        print(f"Failed to parse duration '{duration}': {e}")
-        return None
+def get_youtube_client():
+    if not API_KEY:
+        raise ValueError("YOUTUBE_API_KEY is not set in environment")
+    return build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=API_KEY)
 
-def compute_video_age_weeks(published_at: str) -> float:
+def iso8601_duration_to_minutes(duration_str):
+    try:
+        return parse_duration(duration_str).total_seconds() / 60
+    except Exception:
+        return 0
+
+def compute_video_age_weeks(published_at):
     try:
         published_dt = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ")
-        delta_days = (datetime.now(timezone.utc) - published_dt.replace(tzinfo=timezone.utc)).days
-        return delta_days / 7
+        delta = datetime.utcnow() - published_dt
+        return delta.days / 7
     except Exception:
-        return 52.0  # fallback 1 year
+        return 0
 
-def video_score(AVD: float, VL: float, VA_weeks: float) -> float:
-    """
-    Bob Heifler formula.
-    Note: AVD is currently a proxy (70% of VL), so EngagementScore may be biased upward.
-    """
-    APV = (AVD / VL) * 100
+def video_score(AVD, VL, VA_weeks):
+    APV = (AVD / VL) * 100 if VL > 0 else 0
     EngagementScore = max(0, (APV - 60) / 40)
-    LengthScore = 0 if VL < 9 or VL > 17 else max(0, 1 - (abs(VL - 12) / 5) * 0.3)
-    AgeScore = 0 if VA_weeks < 6 else 1 if VA_weeks <= 78 else 0.5
-    return (0.5 * EngagementScore) + (0.3 * LengthScore) + (0.2 * AgeScore)
+    LengthScore = 0
+    if 9 <= VL <= 17:
+        LengthScore = 1 - (abs(VL - 12) / 5) * 0.3
+    AgeScore = 0
+    if 6 <= VA_weeks <= 78:
+        AgeScore = 1
+    elif VA_weeks > 78:
+        AgeScore = 0.5
+    FinalScore = (0.5 * EngagementScore) + (0.3 * LengthScore) + (0.2 * AgeScore)
+    return FinalScore
 
 # ==========================
-# Video Retrieval
+# YouTube API Functions
 # ==========================
-def search_videos(keyword: str, max_results: int = MAX_RESULTS) -> List[Dict]:
+def search_videos(keyword, max_results=MAX_RESULTS):
     youtube = get_youtube_client()
+    try:
+        request = youtube.search().list(
+            q=keyword,
+            type="video",
+            videoLicense="creativeCommon",
+            part="id,snippet",
+            maxResults=max_results,
+            order="viewCount",
+            safeSearch="moderate"
+        )
+        response = request.execute()
+    except HttpError as e:
+        print(f"Search error for '{keyword}': {e}")
+        return []
+
     videos = []
-    next_page_token = None
-
-    while len(videos) < max_results:
-        try:
-            request = youtube.search().list(
-                q=keyword,
-                type="video",
-                videoLicense="creativeCommon",
-                part="id,snippet",
-                maxResults=min(50, max_results - len(videos)),  # API max per page is 50
-                order="viewCount",
-                safeSearch="moderate",
-                pageToken=next_page_token
-            )
-            response = request.execute()
-        except HttpError as e:
-            print(f"Search error: {e}")
-            break
-
-        items = response.get("items", [])
-        if not items:
-            break
-
-        for item in items:
-            videos.append({
-                "video_id": item["id"]["videoId"],
-                "title": item["snippet"]["title"],
-                "description": item["snippet"]["description"],
-                "published_at": item["snippet"]["publishedAt"]
-            })
-
-        next_page_token = response.get("nextPageToken")
-        if not next_page_token:
-            break
-
-    if len(videos) < max_results:
-        print(f"Warning: Only {len(videos)} videos found for keyword '{keyword}'.")
-
+    for item in response.get("items", []):
+        videos.append({
+            "video_id": item["id"]["videoId"],
+            "title": item["snippet"]["title"],
+            "description": item["snippet"]["description"],
+            "published_at": item["snippet"]["publishedAt"]
+        })
     return videos
 
-def get_video_details(video_ids: List[str]) -> Dict[str, Dict]:
+def get_video_details(video_ids):
     youtube = get_youtube_client()
-    details = {}
     try:
         request = youtube.videos().list(
             part="contentDetails,statistics,snippet",
@@ -117,80 +103,69 @@ def get_video_details(video_ids: List[str]) -> Dict[str, Dict]:
         response = request.execute()
     except HttpError as e:
         print(f"Details error: {e}")
-        return details
+        return {}
 
+    details = {}
     for item in response.get("items", []):
         vid = item["id"]
-        VL = iso8601_duration_to_minutes(item["contentDetails"]["duration"])
-        if VL is None:
-            continue  # skip invalid durations
-
-        # Proxy for AVD; replace with Analytics API for real data
-        AVD = VL * 0.7
-
-        VA_weeks = compute_video_age_weeks(item["snippet"]["publishedAt"])
-
-        # Store statistics for optional future dynamic scoring
-        stats = item.get("statistics", {})
-        view_count = int(stats.get("viewCount", 0))
-        like_count = int(stats.get("likeCount", 0))
-
-        details[vid] = {
-            "VL": VL,
-            "AVD": AVD,
-            "VA_weeks": VA_weeks,
-            "view_count": view_count,
-            "like_count": like_count
-        }
+        try:
+            VL = iso8601_duration_to_minutes(item["contentDetails"]["duration"])
+            AVD = VL * 0.7  # Proxy for average view duration
+            VA_weeks = compute_video_age_weeks(item["snippet"]["publishedAt"])
+            details[vid] = {"VL": VL, "AVD": AVD, "VA_weeks": VA_weeks}
+        except Exception:
+            continue
     return details
 
 # ==========================
-# Ranking & Filtering
+# Main Ranking & Selection
 # ==========================
-def rank_videos(videos: List[Dict]) -> List[Dict]:
+def select_top_video(keyword):
+    videos = search_videos(keyword)
     if not videos:
         return []
-
     video_ids = [v["video_id"] for v in videos]
     details = get_video_details(video_ids)
-
-    filtered = []
+    ranked = []
     for v in videos:
         vid = v["video_id"]
         if vid not in details:
             continue
-        d = details[vid]
-        score = video_score(d["AVD"], d["VL"], d["VA_weeks"])
-        if score >= 0.8 and 6 <= d["VA_weeks"] <= 78 and 9 <= d["VL"] <= 17:
-            v.update({
-                "VL": d["VL"],
-                "AVD": d["AVD"],
-                "VA_weeks": d["VA_weeks"],
-                "view_count": d["view_count"],
-                "like_count": d["like_count"],
-                "final_score": score
-            })
-            filtered.append(v)
-
-    return sorted(filtered, key=lambda x: x["final_score"], reverse=True)
+        VL = details[vid]["VL"]
+        AVD = details[vid]["AVD"]
+        VA_weeks = details[vid]["VA_weeks"]
+        score = video_score(AVD, VL, VA_weeks)
+        v.update({"VL": VL, "AVD": AVD, "VA_weeks": VA_weeks, "final_score": score})
+        ranked.append(v)
+    return ranked
 
 # ==========================
-# Top Video Selector
+# Run Across All Niches/Keywords
 # ==========================
-def select_top_video(keyword: str) -> Optional[Dict]:
-    videos = search_videos(keyword)
-    ranked = rank_videos(videos)
-    return ranked[0] if ranked else None
+def run_all_keywords():
+    all_results = []
+    for niche, keywords in niches.items():
+        for kw in keywords:
+            print(f"Processing keyword: {kw} in niche: {niche}")
+            videos = select_top_video(kw)
+            for v in videos:
+                v["keyword"] = kw
+                v["niche"] = niche
+                all_results.append(v)
+
+    videos_met_criteria = [v for v in all_results if v["final_score"] >= THRESHOLD]
+    videos_close = [v for v in all_results if NEAR_THRESHOLD <= v["final_score"] < THRESHOLD]
+
+    with open("videos_met_criteria.json", "w") as f:
+        json.dump(videos_met_criteria, f, indent=2)
+    with open("videos_close.json", "w") as f:
+        json.dump(videos_close, f, indent=2)
+
+    print(f"Videos meeting criteria: {len(videos_met_criteria)}")
+    print(f"Videos close to threshold: {len(videos_close)}")
 
 # ==========================
-# Example Usage
+# Main
 # ==========================
 if __name__ == "__main__":
-    keyword = "weight loss"
-    top_video = select_top_video(keyword)
-    if top_video:
-        print("Top Video:")
-        for k, v in top_video.items():
-            print(f"{k}: {v}")
-    else:
-        print("No video met the 0.8+ FinalScore criteria.")
+    run_all_keywords()
