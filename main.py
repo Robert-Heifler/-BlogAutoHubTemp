@@ -1,71 +1,50 @@
 import os
 import json
-import random
-import datetime
-import requests
-from flask import Flask
-import os
+from flask import Flask, request
 
-# === Print deployed filesystem ===
-print("===== Deployed filesystem structure =====")
-for root, dirs, files in os.walk("/app"):  # /app is where Render mounts your repo
-    print(f"Directory: {root}")
-    print(f" Subdirectories: {dirs}")
-    print(f" Files: {files}")
-print("===== End of filesystem structure =====")
+# -----------------------------
+# Runtime config generation
+# -----------------------------
+CONFIG_PATH = "config.json"
 
-# === Check for required files ===
-required_files = ["main.py", "keywords.json", "config.json"]  # add all your needed files here
-missing_files = []
-for file in required_files:
-    file_path = os.path.join("/app", file)
-    if not os.path.isfile(file_path):
-        missing_files.append(file)
-
-if missing_files:
-    print("!!! MISSING FILES !!!")
-    for f in missing_files:
-        print(f" - {f}")
-else:
-    print("All required files are present ✅")
-
-app = Flask(__name__)
-
-# -------------------------------
-# Load keywords.json OR fallback
-# -------------------------------
-try:
-    with open("keywords.json", "r", encoding="utf-8") as f:
-        keywords = json.load(f)
-except FileNotFoundError:
-    print("⚠️ keywords.json not found — using default placeholder keywords")
-    keywords = {
-        "weight_loss": ["diet", "exercise", "fat burning"],
-        "pelvic_health": ["pelvic floor", "postpartum recovery"],
-        "joint_relief": ["arthritis relief", "joint pain"],
-        "liver_detox": ["liver cleanse", "detox tips"],
-        "side_hustles": ["make money online", "passive income"],
-        "respiratory_health": ["lung health", "breathing exercises"],
+if not os.path.exists(CONFIG_PATH):
+    config_data = {
+        "GOOGLE_CLIENT_ID": os.environ.get("GOOGLE_CLIENT_ID"),
+        "GOOGLE_CLIENT_SECRET": os.environ.get("GOOGLE_CLIENT_SECRET"),
+        "GOOGLE_REFRESH_TOKEN": os.environ.get("GOOGLE_REFRESH_TOKEN")
     }
 
-# -------------------------------
-# Example function that uses keywords
-# -------------------------------
-def get_random_keyword(niche: str) -> str:
-    """Return a random keyword for the given niche."""
-    return random.choice(keywords.get(niche, ["general health"]))
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(config_data, f)
 
-# -------------------------------
-# Main route for Render health check
-# -------------------------------
-@app.route("/")
+# -----------------------------
+# Load config for use in app
+# -----------------------------
+with open(CONFIG_PATH) as f:
+    config = json.load(f)
+
+# -----------------------------
+# Initialize Flask app
+# -----------------------------
+app = Flask(__name__)
+
+@app.route("/", methods=["GET"])
 def index():
-    today = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return f"App running. Time: {today} | Example keyword: {get_random_keyword('weight_loss')}"
+    return "BlogWorker is live!"
 
-# -------------------------------
-# Run app
-# -------------------------------
+# -----------------------------
+# Example route using config
+# -----------------------------
+@app.route("/test-config", methods=["GET"])
+def test_config():
+    return {
+        "client_id": config.get("GOOGLE_CLIENT_ID"),
+        "client_secret_present": bool(config.get("GOOGLE_CLIENT_SECRET")),
+        "refresh_token_present": bool(config.get("GOOGLE_REFRESH_TOKEN"))
+    }
+
+# -----------------------------
+# Start the app
+# -----------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
