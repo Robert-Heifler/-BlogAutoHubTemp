@@ -2,8 +2,33 @@
 .env
 config.json
 
-# Python cache and environment folders
+# Ignore secret keys/tokens folders & files
+PWs_Secret_Keys_Tokens_Environ/
+LatestClientID-And-Secret*.txt
+get_refresh_token.py
+set_render_env.py
+
+# Python cache and virtual environments
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+dist/
+build/
 venv/
+.venv/
+
+# IDE/editor junk
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# Logs
+*.log
+
 
