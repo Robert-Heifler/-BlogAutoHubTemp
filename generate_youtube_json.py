@@ -22,7 +22,7 @@ def parse_duration(duration):
 def age_in_weeks(published_at):
     try:
         dt = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ")
-        dt = dt.replace(tzinfo=timezone.utc)  # make aware datetime in UTC
+        dt = dt.replace(tzinfo=timezone.utc)
         delta = datetime.now(timezone.utc) - dt
         return delta.days / 7
     except Exception:
@@ -142,4 +142,29 @@ def fetch_and_score_youtube_videos():
                     maxResults=25,
                     order="relevance",
                     videoDuration="medium",
-                    videoEmbeddable
+                    videoEmbeddable="true"
+                ).execute()
+            except Exception as e:
+                print(f"Search API error for keyword '{keyword}': {e}")
+                continue
+
+            for item in search_res.get("items", []):
+                vid = item["id"].get("videoId")
+                if not vid or vid in existing_video_ids:
+                    continue
+
+                video_info = get_video_data(vid)
+                if not video_info:
+                    continue
+
+                result_data[niche_name].append(video_info)
+                existing_video_ids.add(vid)
+
+        result_data[niche_name] = sorted(result_data[niche_name], key=lambda x: x["score"], reverse=True)
+
+    save_results(result_data)
+    print(f"✅ Completed update: {OUTPUT_FILE}")
+    return result_data
+
+if __name__ == "__main__":
+    fetch_and_score_youtube_videos()
