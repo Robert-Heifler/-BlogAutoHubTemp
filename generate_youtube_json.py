@@ -1,10 +1,10 @@
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from googleapiclient.discovery import build
 import isodate
 
-KEYWORDS_FILE = "keywords.json"  # Your keyword file, rename if needed
+KEYWORDS_FILE = "keywords.json"
 OUTPUT_FILE = "youtube_videos_scored.json"
 
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
@@ -22,7 +22,8 @@ def parse_duration(duration):
 def age_in_weeks(published_at):
     try:
         dt = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ")
-        delta = datetime.utcnow() - dt
+        dt = dt.replace(tzinfo=timezone.utc)  # make aware datetime in UTC
+        delta = datetime.now(timezone.utc) - dt
         return delta.days / 7
     except Exception:
         return None
@@ -92,7 +93,7 @@ def get_video_data(video_id):
         "duration_minutes": round(vl, 2) if vl else None,
         "views": views,
         "score": round(score, 3),
-        "used_in_blog": False  # default flag when adding
+        "used_in_blog": False
     }
 
 def load_results():
@@ -130,7 +131,6 @@ def fetch_and_score_youtube_videos():
         if niche_name not in result_data:
             result_data[niche_name] = []
 
-        # Collect existing video IDs for duplication check
         existing_video_ids = {v["video_id"] for v in result_data[niche_name]}
 
         for keyword in keywords:
@@ -142,31 +142,4 @@ def fetch_and_score_youtube_videos():
                     maxResults=25,
                     order="relevance",
                     videoDuration="medium",
-                    videoEmbeddable="true"
-                ).execute()
-            except Exception as e:
-                print(f"Search API error for keyword '{keyword}': {e}")
-                continue
-
-            for item in search_res.get("items", []):
-                vid = item["id"].get("videoId")
-                if not vid or vid in existing_video_ids:
-                    continue
-
-                video_info = get_video_data(vid)
-                if not video_info:
-                    continue
-
-                # Add new unique video
-                result_data[niche_name].append(video_info)
-                existing_video_ids.add(vid)
-
-        # Sort niche videos by score descending
-        result_data[niche_name] = sorted(result_data[niche_name], key=lambda x: x["score"], reverse=True)
-
-    save_results(result_data)
-    print(f"✅ Completed update: {OUTPUT_FILE}")
-    return result_data
-
-if __name__ == "__main__":
-    fetch_and_score_youtube_videos()
+                    videoEmbeddable
