@@ -2,6 +2,22 @@ import os
 print("DEBUG: Starting script execution.")
 print("DEBUG: YOUTUBE_API_KEY value:", os.getenv("YOUTUBE_API_KEY"))
 print("DEBUG: Running in Render service -- add a unique identifier here!")
+
+import os
+import sys
+
+REQUIRED_ENV_VARS = ["YOUTUBE_API_KEY"]
+
+missing_vars = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
+if missing_vars:
+    sys.stderr.write(f"Critical Error: Missing required environment variables: {missing_vars}\n")
+    sys.exit(1)
+
+print(f"All required environment variables are set: {REQUIRED_ENV_VARS}")
+
+
+
+
 import json
 import subprocess
 from googleapiclient.discovery import build
