@@ -1,4 +1,7 @@
 import os
+print("DEBUG: Starting script execution.")
+print("DEBUG: YOUTUBE_API_KEY value:", os.getenv("YOUTUBE_API_KEY"))
+print("DEBUG: Running in Render service -- add a unique identifier here!")
 import json
 import subprocess
 from googleapiclient.discovery import build
